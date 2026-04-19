@@ -378,7 +378,7 @@ function MiniLineChart({
       }))}
       layout={{
         height,
-        margin: { l: 40, r: 10, t: 10, b: 30 },
+        margin: { l: 40, r: 10, t: 10, b: 50 },
         xaxis: { range: [0, 49], gridcolor: '#e2e8f0' },
         yaxis: {
           gridcolor: '#e2e8f0',
@@ -388,7 +388,14 @@ function MiniLineChart({
         },
         paper_bgcolor: 'white',
         plot_bgcolor: 'white',
-        legend: { orientation: 'h', x: 0, y: 1.15, font: { family: 'monospace', size: 9 } },
+        legend: {
+          orientation: 'h',
+          x: 0.5,
+          xanchor: 'center',
+          y: -0.15,
+          yanchor: 'top',
+          font: { family: 'monospace', size: 9 },
+        },
         font: { family: 'system-ui', size: 10, color: '#0f172a' },
       }}
       config={{ displayModeBar: false, responsive: true }}
