@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import Navigation, { type RouteId, ROUTES } from './components/Navigation';
 import Intro from './components/Intro';
 import SessionExplorer from './components/SessionExplorer';
+import AugmentationView from './components/AugmentationView';
 import AlignmentDemo from './components/AlignmentDemo';
 import CoefficientsView from './components/CoefficientsView';
 import DecayCurves from './components/DecayCurves';
@@ -40,6 +41,7 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8">
         {route === 'intro' && <Intro />}
         {route === 'session' && <SessionExplorer />}
+        {route === 'augmentation' && <AugmentationView />}
         {route === 'alignment' && <AlignmentDemo />}
         {route === 'coefficients' && <CoefficientsView />}
         {route === 'decay' && <DecayCurves />}

@@ -3,6 +3,7 @@ import { loadModel } from '../lib/dataLoaders';
 import type { ModelData } from '../lib/types';
 import { fmtSharpe } from '../lib/format';
 import MathBlock from './MathBlock';
+import { TimelineDiagram } from './AugmentationView';
 
 export default function Intro() {
   const [m, setM] = useState<ModelData | null>(null);
@@ -303,6 +304,7 @@ export default function Intro() {
             <span className="font-mono">{m.augmentation.session_offset}</span>{' '}
             to avoid collision.
           </p>
+          <TimelineDiagram splitBar={m.augmentation.split_bar} />
           <p className="text-slate-700 leading-relaxed">
             This doubles the labelled set from{' '}
             <span className="font-mono">{m.n_train_original}</span> to{' '}
@@ -312,7 +314,15 @@ export default function Intro() {
             <em>group = original session id</em>, so the augmented twin and its
             original never end up split across train and test — without that
             guard the CV Sharpe would be artificially inflated by the model
-            essentially seeing the future of a held-out session.
+            essentially seeing the future of a held-out session. See the{' '}
+            <a
+              className="text-indigo-700 hover:underline"
+              href="#/augmentation"
+            >
+              Augmentation
+            </a>{' '}
+            tab for the side-by-side session viewer and the GroupKFold
+            leakage diagram.
           </p>
         </section>
       )}

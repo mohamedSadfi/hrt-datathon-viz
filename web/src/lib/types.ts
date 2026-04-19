@@ -13,10 +13,13 @@ export interface HeadlineEntry {
   t: string;
   fb: number;
   llm: LlmSentiment;
-  align3: number;
-  align5: number;
-  final3: number;
-  final5: number;
+  // Alignment fields are populated only for headlines in the original seen
+  // window (b ≤ 49). Headlines from headlines_unseen_train.parquet (b ≥ 50)
+  // omit these — the model never uses them as features in the original split.
+  align3?: number;
+  align5?: number;
+  final3?: number;
+  final5?: number;
 }
 
 export interface SessionData {

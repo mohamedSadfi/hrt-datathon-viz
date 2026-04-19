@@ -294,6 +294,7 @@ def main():
     seen_by_sess = {sid: g.sort_values("bar_ix") for sid, g in bars_seen.groupby("session")}
     unseen_by_sess = {sid: g.sort_values("bar_ix") for sid, g in bars_unseen.groupby("session")}
     headlines_by_sess = {sid: g for sid, g in headlines_seen.groupby("session")}
+    headlines_unseen_by_sess = {sid: g for sid, g in headlines_unseen.groupby("session")}
 
     llm_map = solution.LLM_SENTIMENTS
     sess_to_pos = {int(s): i for i, s in enumerate(sessions_orig)}
@@ -311,7 +312,9 @@ def main():
         ]
         ub = unseen_by_sess.get(sid_int)
         unseen_bars_list = (
-            [{"b": int(r.bar_ix), "c": float(r.close)} for r in ub.itertuples(index=False)]
+            [{"b": int(r.bar_ix), "o": float(r.open), "h": float(r.high),
+              "l": float(r.low), "c": float(r.close)}
+             for r in ub.itertuples(index=False)]
             if ub is not None else []
         )
 
@@ -331,6 +334,16 @@ def main():
                     "final3": float(a["final3"]),
                     "final5": float(a["final5"]),
                 })
+        if sid_int in headlines_unseen_by_sess:
+            hg = headlines_unseen_by_sess[sid_int].sort_values("bar_ix")
+            for _, row in hg.iterrows():
+                hl_list.append({
+                    "b": int(row["bar_ix"]),
+                    "t": str(row["headline"]),
+                    "fb": float(solution.FINBERT_SCORES.get(row["headline"], 0.0)),
+                    "llm": str(llm_map.get(row["headline"], "neutral")),
+                })
+        hl_list.sort(key=lambda h: h["b"])
 
         sessions_payload.append({
             "session": sid_int,

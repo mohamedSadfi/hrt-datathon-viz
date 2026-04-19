@@ -1,6 +1,7 @@
 export const ROUTES = [
   { id: 'intro', label: 'Intro' },
   { id: 'session', label: 'Sessions' },
+  { id: 'augmentation', label: 'Augmentation' },
   { id: 'alignment', label: 'Alignment' },
   { id: 'coefficients', label: 'Coefficients' },
   { id: 'decay', label: 'Decay' },

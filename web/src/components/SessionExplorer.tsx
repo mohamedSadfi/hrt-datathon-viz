@@ -46,6 +46,7 @@ export default function SessionExplorer() {
   const unseen = session.unseen_bars;
   const closeMap = new Map<number, number>();
   for (const b of seen) closeMap.set(b.b, b.c);
+  for (const b of unseen) closeMap.set(b.b, b.c);
 
   const headlineX = session.headlines.map((h) => h.b);
   const headlineY = session.headlines.map((h) => closeMap.get(h.b) ?? 1);
@@ -180,13 +181,20 @@ export default function SessionExplorer() {
               y: headlineY,
               name: 'headlines',
               text: session.headlines.map(
-                (h, i) =>
-                  `<b>bar ${h.b}</b><br>${h.t.replace(/</g, '&lt;')}<br>` +
-                  `FinBERT ${fmtSigned(h.fb, 3)} · LLM ${h.llm}<br>` +
-                  `align3 ${fmtSigned(h.align3, 3)} · final3 ${fmtSigned(
-                    h.final3,
-                    3,
-                  )}<extra>#${i}</extra>`,
+                (h, i) => {
+                  const tail =
+                    h.align3 !== undefined && h.final3 !== undefined
+                      ? `align3 ${fmtSigned(h.align3, 3)} · final3 ${fmtSigned(
+                          h.final3,
+                          3,
+                        )}`
+                      : `(in unseen window — no alignment)`;
+                  return (
+                    `<b>bar ${h.b}</b><br>${h.t.replace(/</g, '&lt;')}<br>` +
+                    `FinBERT ${fmtSigned(h.fb, 3)} · LLM ${h.llm}<br>` +
+                    `${tail}<extra>#${i}</extra>`
+                  );
+                },
               ),
               hovertemplate: '%{text}',
               marker: {
@@ -298,8 +306,10 @@ export default function SessionExplorer() {
                   }`}
                 >
                   <div className="text-xs text-slate-500 font-mono">
-                    bar {h.b} · fb {fmtSigned(h.fb, 3)} · llm {h.llm} ·
-                    final3 {fmtSigned(h.final3, 3)}
+                    bar {h.b} · fb {fmtSigned(h.fb, 3)} · llm {h.llm}
+                    {h.final3 !== undefined && (
+                      <> · final3 {fmtSigned(h.final3, 3)}</>
+                    )}
                   </div>
                   <div className="text-slate-800">{h.t}</div>
                 </li>
