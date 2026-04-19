@@ -43,9 +43,10 @@ jobs:
           import json, sys
           m = json.load(open('web/public/data/model.json'))
           assert 2.5 < m['cv_mean_sharpe'] < 4.0, f'CV Sharpe {m[\"cv_mean_sharpe\"]} out of expected band'
-          assert m['n_train'] == 1000, f'Expected 1000 train sessions, got {m[\"n_train\"]}'
+          assert m.get('n_train_original') == 1000, f'Expected 1000 original sessions, got {m.get(\"n_train_original\")}'
+          assert m['n_train'] >= 1000, f'Total train samples below 1000: {m[\"n_train\"]}'
           assert len(m['feature_cols']) == 10
-          print(f'OK: cv_mean_sharpe={m[\"cv_mean_sharpe\"]:.4f}  alpha_star={m[\"alpha_star\"]}')
+          print(f'OK: cv_mean_sharpe={m[\"cv_mean_sharpe\"]:.4f}  alpha_star={m[\"alpha_star\"]}  n_train={m[\"n_train\"]}')
           "
 
       - name: Set up Node
