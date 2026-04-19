@@ -274,7 +274,7 @@ def main():
         "feature_cols": list(solution.FEATURE_COLS),
         "feature_means": {c: float(scaler.mean_[i]) for i, c in enumerate(solution.FEATURE_COLS)},
         "feature_stds": {c: float(scaler.scale_[i]) for i, c in enumerate(solution.FEATURE_COLS)},
-        "lb_score_public": 2.88,
+        "lb_score_public": 3.02694,
         "lb_score_private": None,
         "n_train_original": int(is_orig.sum()),
         "n_train_augmented": int((~is_orig).sum()),

@@ -30,7 +30,7 @@ export default function App() {
               HRT Datathon 2026 — Solution Walkthrough
             </h1>
             <p className="text-xs text-slate-500 font-mono">
-              Ridge regression + alignment-weighted FinBERT sentiment · LB Sharpe 2.88
+              Ridge regression + alignment-weighted FinBERT sentiment · LB Sharpe 3.027
             </p>
           </div>
           <Navigation current={route} />
