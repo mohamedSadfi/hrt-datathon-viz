@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { loadModel, loadSessions } from '../lib/dataLoaders';
 import type { ModelData, SessionData } from '../lib/types';
-import { fmtSigned, fmtSciOrFixed } from '../lib/format';
+import { fmtSigned } from '../lib/format';
 import Plot from '../lib/Plot';
 
 const LLM_SYMBOL: Record<string, string> = {
@@ -323,17 +323,14 @@ export default function SessionExplorer() {
             Feature contributions
           </h3>
           <p className="text-xs text-slate-500 mb-2">
-            contribution = (raw − μ)/σ × coef. Sorted by |contribution|. Top 3
-            in <span className="font-semibold">bold</span>.
+            Sorted by |contribution|. Top 3 in{' '}
+            <span className="font-semibold">bold</span>.
           </p>
           <table className="w-full text-xs font-mono">
             <thead className="text-slate-500 border-b">
               <tr>
                 <th className="text-left py-1">Feature</th>
-                <th className="text-right py-1">Raw</th>
-                <th className="text-right py-1">Std</th>
                 <th className="text-right py-1">Coef</th>
-                <th className="text-right py-1">Contrib</th>
               </tr>
             </thead>
             <tbody>
@@ -345,21 +342,12 @@ export default function SessionExplorer() {
                   }`}
                 >
                   <td className="py-1">{r.name}</td>
-                  <td className="text-right py-1">
-                    {fmtSciOrFixed(r.raw)}
-                  </td>
-                  <td className="text-right py-1">
-                    {fmtSigned(r.standardized, 3)}
-                  </td>
-                  <td className="text-right py-1">{fmtSigned(r.coef, 3)}</td>
                   <td
                     className={`text-right py-1 ${
-                      r.contribution >= 0
-                        ? 'text-teal-700'
-                        : 'text-orange-700'
+                      r.coef >= 0 ? 'text-teal-700' : 'text-orange-700'
                     }`}
                   >
-                    {fmtSigned(r.contribution, 3)}
+                    {fmtSigned(r.coef, 3)}
                   </td>
                 </tr>
               ))}

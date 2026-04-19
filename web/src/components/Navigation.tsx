@@ -6,6 +6,7 @@ export const ROUTES = [
   { id: 'coefficients', label: 'Coefficients' },
   { id: 'decay', label: 'Decay' },
   { id: 'performance', label: 'Performance' },
+  { id: 'presentation', label: 'Pitch' },
 ] as const;
 
 export type RouteId = (typeof ROUTES)[number]['id'];

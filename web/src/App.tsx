@@ -7,6 +7,7 @@ import AlignmentDemo from './components/AlignmentDemo';
 import CoefficientsView from './components/CoefficientsView';
 import DecayCurves from './components/DecayCurves';
 import PerformancePanel from './components/PerformancePanel';
+import Presentation from './components/Presentation';
 
 function getRouteFromHash(): RouteId {
   const h = window.location.hash.replace(/^#\/?/, '');
@@ -46,6 +47,7 @@ export default function App() {
         {route === 'coefficients' && <CoefficientsView />}
         {route === 'decay' && <DecayCurves />}
         {route === 'performance' && <PerformancePanel />}
+        {route === 'presentation' && <Presentation />}
       </main>
 
       <footer className="border-t border-slate-200 bg-white text-xs text-slate-500 py-3 text-center">

@@ -14,7 +14,7 @@ export default function Intro() {
   return (
     <div className="space-y-6">
       {/* Headline metrics */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="panel">
           <div className="stat-label">CV Sharpe (5-fold)</div>
           <div className="stat">{m ? fmtSharpe(m.cv_mean_sharpe) : '…'}</div>
@@ -22,19 +22,6 @@ export default function Intro() {
         <div className="panel">
           <div className="stat-label">LB Sharpe (public)</div>
           <div className="stat">{m ? fmtSharpe(m.lb_score_public) : '…'}</div>
-        </div>
-        <div className="panel">
-          <div className="stat-label">α*</div>
-          <div className="stat">{m ? m.alpha_star : '…'}</div>
-        </div>
-        <div className="panel">
-          <div className="stat-label">Train sessions</div>
-          <div className="stat">{m ? m.n_train.toLocaleString() : '…'}</div>
-          {m?.augmentation && (
-            <div className="text-xs text-slate-500 mt-1">
-              {m.n_train_original} original + {m.n_train_augmented} augmented
-            </div>
-          )}
         </div>
       </div>
 
@@ -63,21 +50,6 @@ export default function Intro() {
           <em>direction</em> and <em>relative magnitude</em> of positions
           matter.
         </p>
-      </section>
-
-      {/* Parkinson */}
-      <section className="panel space-y-3">
-        <h2 className="text-2xl font-semibold text-slate-900">
-          Volatility — Parkinson estimator
-        </h2>
-        <p className="text-slate-700">
-          We use the Parkinson estimator (range-based) instead of std-of-log-returns: it extracts more
-          information from each bar's high/low and is robust to non-Gaussian returns.
-        </p>
-        <MathBlock
-          display
-          formula="\sigma^2_{\text{park}} = \frac{1}{4 \ln 2} \cdot \overline{\left(\ln \frac{H_t}{L_t}\right)^2} \quad\Rightarrow\quad \text{vol} = \max\!\bigl(\sqrt{\sigma^2_{\text{park}}},\ 10^{-6}\bigr)"
-        />
       </section>
 
       {/* Features */}
@@ -208,7 +180,7 @@ export default function Intro() {
       {/* Alignment */}
       <section className="panel space-y-3">
         <h2 className="text-2xl font-semibold text-slate-900">
-          The alignment mechanism — the novel bit
+          The alignment mechanism
         </h2>
         <p className="text-slate-700 leading-relaxed">
           For each headline at bar{' '}
@@ -246,7 +218,7 @@ export default function Intro() {
       {/* Decay optimization */}
       <section className="panel space-y-3">
         <h2 className="text-2xl font-semibold text-slate-900">
-          Decay optimization — differentiable Ridge
+          Decay optimization
         </h2>
         <p className="text-slate-700 leading-relaxed">
           The decay rates{' '}
@@ -284,6 +256,21 @@ export default function Intro() {
             </div>
           </div>
         )}
+      </section>
+
+      {/* Parkinson */}
+      <section className="panel space-y-3">
+        <h2 className="text-2xl font-semibold text-slate-900">
+          Volatility — Parkinson estimator
+        </h2>
+        <p className="text-slate-700">
+          We use the Parkinson estimator (range-based) instead of std-of-log-returns: it extracts more
+          information from each bar's high/low and is robust to non-Gaussian returns.
+        </p>
+        <MathBlock
+          display
+          formula="\sigma^2_{\text{park}} = \frac{1}{4 \ln 2} \cdot \overline{\left(\ln \frac{H_t}{L_t}\right)^2} \quad\Rightarrow\quad \text{vol} = \max\!\bigl(\sqrt{\sigma^2_{\text{park}}},\ 10^{-6}\bigr)"
+        />
       </section>
 
       {/* Data augmentation */}
