@@ -1,448 +1,596 @@
-import { useEffect, useState, type ReactNode } from 'react';
-import { loadModel } from '../lib/dataLoaders';
-import type { ModelData } from '../lib/types';
-import { fmtSharpe } from '../lib/format';
-import MathBlock from './MathBlock';
-import { TimelineDiagram } from './AugmentationView';
+import { useEffect, useMemo, useState } from 'react';
+import { loadModel, loadSessions } from '../lib/dataLoaders';
+import type { ModelData, SessionData } from '../lib/types';
+import { fmtSharpe, fmtSigned } from '../lib/format';
+import Plot from '../lib/Plot';
 
 // ────────────────────────────────────────────────────────────────────────────
-// 6-slide pitch deck (~30 s per slide, target 2-3 min).
-// Built around the live numbers in model.json so it stays in sync with the
-// model (LB Sharpe, CV mean, decays, train counts, alpha*).
+// Pitch — single-page dashboard for live presentation.
+// Pick a session, walk through its candlestick + the per-bar sentiment
+// evolution (the model's view of "what does the news add up to so far"),
+// and the resulting Ridge contribution breakdown.
 // ────────────────────────────────────────────────────────────────────────────
 
-interface SlideProps {
-  m: ModelData;
+const LLM_SYMBOL: Record<string, string> = {
+  pos: 'triangle-up',
+  neutral: 'circle',
+  neg: 'triangle-down',
+};
+
+// Compute the per-bar (t = 0..49) accumulation of every sentiment feature
+// the model uses. This is "what would the model see at bar t if asked to
+// predict now". Mirrors solution.extract_features but evaluated at every t.
+function computeSentimentEvolution(
+  session: SessionData,
+  decayPos: number,
+  decayNeg: number,
+) {
+  const T = 50;
+  const ts = Array.from({ length: T }, (_, t) => t);
+  const headlines = session.headlines.filter(
+    (h) => h.b <= 49 && h.fb !== 0,
+  );
+
+  const fp = new Array(T).fill(0);
+  const fn = new Array(T).fill(0);
+  const fpA3 = new Array(T).fill(0);
+  const fnA3 = new Array(T).fill(0);
+  const fpA5 = new Array(T).fill(0);
+  const fnA5 = new Array(T).fill(0);
+  const llmNeg = new Array(T).fill(0);
+
+  for (let t = 0; t < T; t++) {
+    for (const h of headlines) {
+      if (h.b > t) continue;
+      const age = t - h.b;
+      const wp = Math.exp(-decayPos * age);
+      const wn = Math.exp(-decayNeg * age);
+      if (h.fb > 0) {
+        fp[t] += h.fb * wp;
+        if (h.final3 !== undefined) fpA3[t] += h.final3 * wp;
+        if (h.final5 !== undefined) fpA5[t] += h.final5 * wp;
+      } else {
+        fn[t] += h.fb * wn;
+        if (h.final3 !== undefined) fnA3[t] += h.final3 * wn;
+        if (h.final5 !== undefined) fnA5[t] += h.final5 * wn;
+      }
+      if (h.llm === 'neg') {
+        llmNeg[t] -= Math.exp(-decayNeg * age);
+      }
+    }
+  }
+  const conf = ts.map((_, t) => {
+    const net = fp[t] + fn[t];
+    const gross = fp[t] + Math.abs(fn[t]);
+    return (net * Math.abs(net)) / (gross + 1e-8);
+  });
+  return { ts, fp, fn, conf, fpA3, fnA3, fpA5, fnA5, llmNeg };
 }
 
-function Slide({
-  eyebrow,
-  title,
-  children,
+// Compute per-bar vol-normalized returns (ret_all/last5/last20) using a
+// running Parkinson-vol estimate up to bar t.
+function computeReturnsTimeSeries(session: SessionData) {
+  const bars = session.seen_bars;
+  const T = bars.length;
+  const o0 = bars[0].o ?? bars[0].c;
+  const closes = bars.map((b) => b.c);
+
+  // Running Parkinson vol up to each t (inclusive of bars 0..t).
+  const ln2 = Math.log(2);
+  const parkinsonAccum = new Array(T).fill(0);
+  let sumSq = 0;
+  for (let t = 0; t < T; t++) {
+    const h = bars[t].h ?? bars[t].c;
+    const l = bars[t].l ?? bars[t].c;
+    const r = Math.log(h / l);
+    sumSq += r * r;
+    const variance = sumSq / (4 * ln2 * (t + 1));
+    parkinsonAccum[t] = Math.max(Math.sqrt(variance), 1e-6);
+  }
+  const retAll = closes.map((c, t) => (c / o0 - 1) / parkinsonAccum[t]);
+  const ret5 = closes.map((c, t) => {
+    const k = Math.max(0, t - 5);
+    return (c / closes[k] - 1) / parkinsonAccum[t];
+  });
+  const ret20 = closes.map((c, t) => {
+    const k = Math.max(0, t - 20);
+    return (c / closes[k] - 1) / parkinsonAccum[t];
+  });
+
+  // Running cand_up_ratio.
+  const upRatio = new Array(T).fill(0);
+  let upCount = 0;
+  for (let t = 1; t < T; t++) {
+    if (Math.log(closes[t]) > Math.log(closes[t - 1])) upCount += 1;
+    upRatio[t] = upCount / t;
+  }
+
+  return {
+    ts: bars.map((b) => b.b),
+    retAll,
+    ret5,
+    ret20,
+    upRatio,
+    parkinson: parkinsonAccum,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Sub-components
+// ────────────────────────────────────────────────────────────────────────────
+
+function StatCard({
+  label,
+  value,
+  accent,
 }: {
-  eyebrow: string;
-  title: ReactNode;
-  children: ReactNode;
+  label: string;
+  value: string;
+  accent?: string;
 }) {
   return (
-    <div className="panel min-h-[540px] flex flex-col">
-      <div className="text-xs uppercase tracking-widest text-indigo-600 font-semibold mb-2">
-        {eyebrow}
+    <div className="bg-white rounded-lg border border-slate-200 px-4 py-3">
+      <div className="text-xs uppercase tracking-wide text-slate-500">
+        {label}
       </div>
-      <h2 className="text-3xl sm:text-4xl font-semibold text-slate-900 mb-6 leading-tight">
-        {title}
-      </h2>
-      <div className="flex-1 text-slate-700 text-lg leading-relaxed space-y-4">
-        {children}
+      <div
+        className="text-2xl font-mono font-semibold mt-0.5"
+        style={{ color: accent ?? '#0f172a' }}
+      >
+        {value}
       </div>
     </div>
   );
 }
 
-function SlideTitle({ m }: SlideProps) {
+function CandleChart({ session }: { session: SessionData }) {
+  const seen = session.seen_bars;
+  const unseen = session.unseen_bars;
+  const closeMap = new Map<number, number>();
+  for (const b of seen) closeMap.set(b.b, b.c);
+  for (const b of unseen) closeMap.set(b.b, b.c);
+  const all = [...seen, ...unseen];
+  const yMin = Math.min(...all.map((b) => b.l ?? b.c));
+  const yMax = Math.max(...all.map((b) => b.h ?? b.c));
+  const yPad = (yMax - yMin) * 0.05;
+
   return (
-    <Slide eyebrow="HRT Datathon 2026" title="Predicting market direction from price + news">
-      <p>
-        Each session: 100 bars of OHLC, ~10 news headlines, one anonymous
-        company is the trading subject. We see the first 50 bars and have to
-        decide a long/short position size, scored by Sharpe across all
-        sessions.
-      </p>
-      <div className="grid grid-cols-2 gap-6 pt-4">
-        <div className="bg-slate-50 rounded-lg p-6 text-center">
-          <div className="text-xs uppercase tracking-wide text-slate-500">
-            Public LB Sharpe
-          </div>
-          <div className="text-5xl font-semibold text-indigo-700 mt-2 font-mono">
-            {fmtSharpe(m.lb_score_public)}
-          </div>
-        </div>
-        <div className="bg-slate-50 rounded-lg p-6 text-center">
-          <div className="text-xs uppercase tracking-wide text-slate-500">
-            5-fold GroupKFold CV Sharpe
-          </div>
-          <div className="text-5xl font-semibold text-teal-700 mt-2 font-mono">
-            {fmtSharpe(m.cv_mean_sharpe)}
-          </div>
-        </div>
-      </div>
-      <p className="text-sm text-slate-500 pt-4">
-        Ridge regression on 10 hand-engineered features. Linear, deterministic,
-        ~6 s end-to-end retraining. The novel piece is how we turn news into
-        self-validating signals.
-      </p>
-    </Slide>
+    <Plot
+      data={[
+        {
+          type: 'candlestick',
+          x: seen.map((b) => b.b),
+          open: seen.map((b) => b.o ?? b.c),
+          high: seen.map((b) => b.h ?? b.c),
+          low: seen.map((b) => b.l ?? b.c),
+          close: seen.map((b) => b.c),
+          increasing: { line: { color: '#0d9488' } },
+          decreasing: { line: { color: '#ea580c' } },
+          showlegend: false,
+        },
+        {
+          type: 'scatter',
+          mode: 'lines',
+          x: unseen.map((b) => b.b),
+          y: unseen.map((b) => b.c),
+          line: { color: '#94a3b8', dash: 'dash', width: 2 },
+          showlegend: false,
+          hovertemplate: 'bar %{x}<br>close %{y:.4f}<extra>unseen</extra>',
+        },
+        {
+          type: 'scatter',
+          mode: 'markers',
+          x: session.headlines.map((h) => h.b),
+          y: session.headlines.map((h) => closeMap.get(h.b) ?? 1),
+          marker: {
+            color: session.headlines.map((h) => h.fb),
+            colorscale: 'RdBu',
+            cmin: -1,
+            cmax: 1,
+            size: 11,
+            symbol: session.headlines.map((h) => LLM_SYMBOL[h.llm] ?? 'circle'),
+            line: { color: '#1e293b', width: 1 },
+          },
+          text: session.headlines.map(
+            (h) =>
+              `<b>bar ${h.b}</b><br>${h.t.replace(/</g, '&lt;')}<br>` +
+              `FinBERT ${fmtSigned(h.fb, 3)} · LLM ${h.llm}<extra></extra>`,
+          ),
+          hovertemplate: '%{text}',
+          showlegend: false,
+        },
+      ]}
+      layout={{
+        height: 360,
+        margin: { l: 50, r: 20, t: 10, b: 40 },
+        xaxis: { title: 'bar', range: [-1, 100], gridcolor: '#e2e8f0', rangeslider: { visible: false } },
+        yaxis: { title: 'price', gridcolor: '#e2e8f0', range: [yMin - yPad, yMax + yPad] },
+        shapes: [
+          {
+            type: 'line',
+            x0: 49.5,
+            x1: 49.5,
+            yref: 'paper',
+            y0: 0,
+            y1: 1,
+            line: { color: '#475569', width: 1.5, dash: 'dot' },
+          },
+        ],
+        annotations: [
+          {
+            x: 49.5,
+            yref: 'paper',
+            y: 1,
+            yanchor: 'bottom',
+            text: 'prediction point',
+            showarrow: false,
+            font: { size: 10, color: '#475569' },
+          },
+        ],
+        paper_bgcolor: 'white',
+        plot_bgcolor: 'white',
+        font: { family: 'system-ui', size: 11, color: '#0f172a' },
+      }}
+      config={{ displayModeBar: false, responsive: true }}
+      style={{ width: '100%' }}
+      useResizeHandler
+    />
   );
 }
 
-function SlideProblem(_: SlideProps) {
+function SentimentEvolutionChart({
+  session,
+  m,
+}: {
+  session: SessionData;
+  m: ModelData;
+}) {
+  const data = useMemo(
+    () => computeSentimentEvolution(session, m.decay_pos, m.decay_neg),
+    [session, m.decay_pos, m.decay_neg],
+  );
   return (
-    <Slide eyebrow="The challenge" title="A noisy signal, half the data, one Sharpe number">
-      <ul className="space-y-3 list-disc list-inside">
-        <li>
-          <strong>Inputs per session:</strong> 50 bars of OHLC (prices
-          normalised to start at 1.0) + ~10 news headlines about{' '}
-          <em>various</em> companies, of which exactly one is the subject —
-          identity not labelled.
-        </li>
-        <li>
-          <strong>Output:</strong> a scalar{' '}
-          <code className="font-mono">target_position</code> at bar 49.
-        </li>
-        <li>
-          <strong>Scoring:</strong>{' '}
-          <MathBlock formula="\text{Sharpe} = \frac{\overline{\pi}}{\sigma(\pi)} \cdot 16, \quad \pi_i = \text{position}_i \cdot (C_{99}/C_{49} - 1)" />
-        </li>
-      </ul>
-      <p className="pt-4">
-        Sharpe is scale-invariant — only direction and relative magnitude of
-        positions matter. So this is fundamentally a <em>signed return
-        prediction</em> problem with a generous noise budget.
-      </p>
-    </Slide>
+    <Plot
+      data={[
+        { x: data.ts, y: data.fp,    type: 'scatter', mode: 'lines', name: 'finbert_pos',         line: { color: '#15803d', width: 2 } },
+        { x: data.ts, y: data.fn,    type: 'scatter', mode: 'lines', name: 'finbert_neg',         line: { color: '#dc2626', width: 2 } },
+        { x: data.ts, y: data.conf,  type: 'scatter', mode: 'lines', name: 'finbert_conf_belief', line: { color: '#0f172a', width: 2 } },
+        { x: data.ts, y: data.fpA3,  type: 'scatter', mode: 'lines', name: 'pos_align3',          line: { color: '#22c55e', width: 1.3, dash: 'dash' } },
+        { x: data.ts, y: data.fnA3,  type: 'scatter', mode: 'lines', name: 'neg_align3',          line: { color: '#fb7185', width: 1.3, dash: 'dash' } },
+        { x: data.ts, y: data.fpA5,  type: 'scatter', mode: 'lines', name: 'pos_align5',          line: { color: '#16a34a', width: 1.3, dash: 'dot' } },
+        { x: data.ts, y: data.fnA5,  type: 'scatter', mode: 'lines', name: 'neg_align5',          line: { color: '#b91c1c', width: 1.3, dash: 'dot' } },
+        { x: data.ts, y: data.llmNeg, type: 'scatter', mode: 'lines', name: 'llm_neg_decay',      line: { color: '#7c2d12', width: 1.5, dash: 'dashdot' } },
+      ]}
+      layout={{
+        height: 320,
+        margin: { l: 50, r: 20, t: 10, b: 40 },
+        xaxis: { title: 'bar (prediction-time-equivalent)', range: [0, 49], gridcolor: '#e2e8f0' },
+        yaxis: { title: 'sentiment score', gridcolor: '#e2e8f0', zerolinecolor: '#94a3b8' },
+        legend: {
+          orientation: 'v',
+          x: 1.02,
+          y: 1,
+          font: { family: 'monospace', size: 10 },
+        },
+        shapes: [
+          {
+            type: 'line',
+            x0: 49,
+            x1: 49,
+            yref: 'paper',
+            y0: 0,
+            y1: 1,
+            line: { color: '#475569', width: 1, dash: 'dot' },
+          },
+        ],
+        paper_bgcolor: 'white',
+        plot_bgcolor: 'white',
+        font: { family: 'system-ui', size: 11, color: '#0f172a' },
+      }}
+      config={{ displayModeBar: false, responsive: true }}
+      style={{ width: '100%' }}
+      useResizeHandler
+    />
   );
 }
 
-function SlideFeatures(_: SlideProps) {
+function FeatureContributionChart({
+  session,
+  m,
+}: {
+  session: SessionData;
+  m: ModelData;
+}) {
+  const rows = useMemo(() => {
+    return m.feature_cols
+      .map((name) => {
+        const raw = session.features[name];
+        const mean = m.feature_means[name];
+        const std = m.feature_stds[name];
+        const standardized = std > 0 ? (raw - mean) / std : 0;
+        const coef = m.coefs[name];
+        const contribution = standardized * coef;
+        return { name, contribution };
+      })
+      .sort((a, b) => Math.abs(a.contribution) - Math.abs(b.contribution));
+  }, [session, m]);
+
   return (
-    <Slide eyebrow="The model" title="Ridge on 10 vol-normalised features">
-      <p>
-        All features are dimensionless (Sharpe-like quantities). Three
-        families:
-      </p>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
-        <div className="bg-teal-50 rounded-lg p-4">
-          <div className="text-xs uppercase tracking-wide text-teal-700 font-semibold">
-            Price (3)
-          </div>
-          <ul className="mt-2 space-y-1 text-sm font-mono text-slate-800">
-            <li>ret_all_vol</li>
-            <li>ret_last5_vol</li>
-            <li>ret_last20_vol</li>
-          </ul>
-          <p className="text-xs text-slate-600 mt-2">
-            Mean-reversion on the 20-bar window dominates.
-          </p>
-        </div>
-        <div className="bg-amber-50 rounded-lg p-4">
-          <div className="text-xs uppercase tracking-wide text-amber-700 font-semibold">
-            Path shape (1)
-          </div>
-          <ul className="mt-2 space-y-1 text-sm font-mono text-slate-800">
-            <li>cand_up_ratio</li>
-          </ul>
-          <p className="text-xs text-slate-600 mt-2">
-            Fraction of up-bars — distinguishes steady climb vs few big jumps.
-          </p>
-        </div>
-        <div className="bg-indigo-50 rounded-lg p-4">
-          <div className="text-xs uppercase tracking-wide text-indigo-700 font-semibold">
-            News sentiment (6)
-          </div>
-          <ul className="mt-2 space-y-1 text-sm font-mono text-slate-800">
-            <li>finbert_pos_align{'{3,5}'}</li>
-            <li>finbert_neg_align{'{3,5}'}</li>
-            <li>finbert_conf_belief</li>
-            <li>llm_neg_decay</li>
-          </ul>
-          <p className="text-xs text-slate-600 mt-2">
-            FinBERT scores filtered through an alignment scalar (next slide) +
-            an LLM-tagged negative count.
-          </p>
-        </div>
-      </div>
-      <p className="pt-4 text-sm text-slate-500">
-        Ridge α chosen by 5-fold GroupKFold over a 17-point grid; the optimum
-        sits on a broad flat ridge ≈ α ∈ [300, 750], so the model is
-        insensitive to that knob.
-      </p>
-    </Slide>
+    <Plot
+      data={[
+        {
+          type: 'bar',
+          orientation: 'h',
+          y: rows.map((r) => r.name),
+          x: rows.map((r) => r.contribution),
+          marker: {
+            color: rows.map((r) => (r.contribution >= 0 ? '#0d9488' : '#ea580c')),
+          },
+          text: rows.map((r) => fmtSigned(r.contribution, 3)),
+          textposition: 'outside',
+          hovertemplate: '<b>%{y}</b><br>contribution = %{x:+.4f}<extra></extra>',
+        },
+      ]}
+      layout={{
+        height: 360,
+        margin: { l: 160, r: 60, t: 10, b: 40 },
+        xaxis: {
+          title: 'standardized × coef',
+          zeroline: true,
+          zerolinecolor: '#94a3b8',
+          gridcolor: '#e2e8f0',
+        },
+        yaxis: { automargin: true, tickfont: { family: 'monospace', size: 11 } },
+        paper_bgcolor: 'white',
+        plot_bgcolor: 'white',
+        showlegend: false,
+        font: { family: 'system-ui', size: 11, color: '#0f172a' },
+      }}
+      config={{ displayModeBar: false, responsive: true }}
+      style={{ width: '100%' }}
+      useResizeHandler
+    />
   );
 }
 
-function SlideAlignment(_: SlideProps) {
+function MiniLineChart({
+  ts,
+  series,
+  height = 180,
+  yZero = false,
+  yLabel,
+}: {
+  ts: number[];
+  series: { name: string; y: number[]; color: string }[];
+  height?: number;
+  yZero?: boolean;
+  yLabel?: string;
+}) {
   return (
-    <Slide
-      eyebrow="The novel bit"
-      title={
-        <>
-          Headlines that the market <em>contradicts</em> self-mute
-        </>
-      }
-    >
-      <p>
-        For a headline at bar <MathBlock formula="b_h" /> with FinBERT score{' '}
-        <MathBlock formula="s \in [-1, 1]" />, look ahead k ∈ {'{3, 5}'} bars
-        and form the normalised motion vector{' '}
-        <MathBlock formula="(u_k, v_k)" />. The alignment scalar is the signed
-        sine of its angle:
-      </p>
-      <MathBlock
-        display
-        formula="\text{align}_k = s \cdot \frac{v_k}{\sqrt{u_k^2 + v_k^2 + 10^{-8}}}, \qquad \mathrm{final}_k = s \cdot \max(0, \text{align}_k)"
-      />
-      <div className="bg-slate-50 rounded-lg p-4 grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-        <div>
-          <div className="text-sm font-semibold text-teal-700">
-            Bullish news + price rises
-          </div>
-          <div className="text-xs text-slate-600 mt-1">
-            sign(s) = sign(v) → align &gt; 0 → final {'>'} 0. Counts.
-          </div>
-        </div>
-        <div>
-          <div className="text-sm font-semibold text-orange-700">
-            Bullish news + price falls
-          </div>
-          <div className="text-xs text-slate-600 mt-1">
-            sign(s) ≠ sign(v) → align &lt; 0 → final = 0. Muted.
-          </div>
-        </div>
-      </div>
-      <p className="pt-2">
-        The result: irrelevant or wrong-company headlines that don&apos;t move
-        the price stop contributing to the feature. Decay rates{' '}
-        <MathBlock formula="(d_+, d_-)" /> for sentiment age are{' '}
-        <em>learned</em> by differentiating Sharpe through the Ridge
-        closed-form (PyTorch + <code className="font-mono">torch.linalg.solve</code>).
-      </p>
-    </Slide>
+    <Plot
+      data={series.map((s) => ({
+        x: ts,
+        y: s.y,
+        type: 'scatter',
+        mode: 'lines',
+        name: s.name,
+        line: { color: s.color, width: 1.5 },
+      }))}
+      layout={{
+        height,
+        margin: { l: 40, r: 10, t: 10, b: 30 },
+        xaxis: { range: [0, 49], gridcolor: '#e2e8f0' },
+        yaxis: {
+          gridcolor: '#e2e8f0',
+          zerolinecolor: '#94a3b8',
+          ...(yLabel ? { title: yLabel } : {}),
+          ...(yZero ? { zeroline: true } : {}),
+        },
+        paper_bgcolor: 'white',
+        plot_bgcolor: 'white',
+        legend: { orientation: 'h', x: 0, y: 1.15, font: { family: 'monospace', size: 9 } },
+        font: { family: 'system-ui', size: 10, color: '#0f172a' },
+      }}
+      config={{ displayModeBar: false, responsive: true }}
+      style={{ width: '100%' }}
+      useResizeHandler
+    />
   );
 }
 
-function SlideAugmentation({ m }: SlideProps) {
-  const split = m.augmentation?.split_bar ?? 74;
-  const augStart = split - 49;
-  return (
-    <Slide
-      eyebrow="More signal from the same labels"
-      title="Shifted-split augmentation + GroupKFold"
-    >
-      <p>
-        We re-use the back half of every <em>training</em> session by sliding
-        the seen window forward to bar {split}, generating a synthetic second
-        sample of the same stock&apos;s trajectory.
-      </p>
-      <div className="bg-slate-50 rounded-lg p-3">
-        <TimelineDiagram splitBar={split} />
-      </div>
-      <div className="grid grid-cols-3 gap-4 text-center pt-2">
-        <div>
-          <div className="text-xs uppercase tracking-wide text-slate-500">
-            Original
-          </div>
-          <div className="text-2xl font-semibold font-mono">
-            {m.n_train_original?.toLocaleString() ?? '—'}
-          </div>
-        </div>
-        <div className="text-3xl text-slate-400 self-center">→</div>
-        <div>
-          <div className="text-xs uppercase tracking-wide text-slate-500">
-            With augmentation
-          </div>
-          <div className="text-2xl font-semibold font-mono text-indigo-700">
-            {m.n_train.toLocaleString()}
-          </div>
-        </div>
-      </div>
-      <p>
-        Honest CV requires <code className="font-mono">GroupKFold</code> with{' '}
-        <em>group = original session id</em> — the augmented twin shares its
-        original&apos;s seen window from bar {augStart} to 49, so a vanilla
-        KFold split would leak the &quot;future&quot; into the test fold.
-      </p>
-    </Slide>
-  );
-}
-
-function SlideResults({ m }: SlideProps) {
-  const std =
-    Math.sqrt(
-      m.cv_fold_sharpes.reduce(
-        (a, s) => a + (s - m.cv_mean_sharpe) ** 2,
-        0,
-      ) / m.cv_fold_sharpes.length,
-    );
-  return (
-    <Slide eyebrow="Results & next steps" title="Honest 3.0+ Sharpe, deterministic, fast">
-      <div className="grid grid-cols-2 gap-6">
-        <div className="bg-slate-50 rounded-lg p-6">
-          <div className="text-xs uppercase tracking-wide text-slate-500">
-            CV Sharpe (5-fold GroupKFold)
-          </div>
-          <div className="text-4xl font-semibold text-teal-700 mt-2 font-mono">
-            {fmtSharpe(m.cv_mean_sharpe)}
-            <span className="text-base text-slate-500 ml-2">
-              ± {fmtSharpe(std)}
-            </span>
-          </div>
-        </div>
-        <div className="bg-slate-50 rounded-lg p-6">
-          <div className="text-xs uppercase tracking-wide text-slate-500">
-            Public LB Sharpe
-          </div>
-          <div className="text-4xl font-semibold text-indigo-700 mt-2 font-mono">
-            {fmtSharpe(m.lb_score_public)}
-          </div>
-        </div>
-        <div className="bg-slate-50 rounded-lg p-6">
-          <div className="text-xs uppercase tracking-wide text-slate-500">
-            α*
-          </div>
-          <div className="text-3xl font-semibold mt-2 font-mono">
-            {m.alpha_star}
-          </div>
-          <div className="text-xs text-slate-500 mt-1">
-            on a broad flat ridge of optima
-          </div>
-        </div>
-        <div className="bg-slate-50 rounded-lg p-6">
-          <div className="text-xs uppercase tracking-wide text-slate-500">
-            Learned decays
-          </div>
-          <div className="text-xl font-mono mt-2">
-            d₊ = {m.decay_pos.toFixed(3)} · d₋ = {m.decay_neg.toFixed(3)}
-          </div>
-          <div className="text-xs text-slate-500 mt-1">
-            half-life ≈ {(Math.log(2) / m.decay_pos).toFixed(0)} /{' '}
-            {(Math.log(2) / m.decay_neg).toFixed(0)} bars
-          </div>
-        </div>
-      </div>
-      <div className="pt-4 text-base text-slate-600">
-        <p className="font-semibold text-slate-900">Explore the rest of the site:</p>
-        <ul className="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-1 text-sm">
-          <li>
-            <a className="text-indigo-700 hover:underline" href="#/session">
-              Sessions
-            </a>{' '}
-            — per-session predictions
-          </li>
-          <li>
-            <a
-              className="text-indigo-700 hover:underline"
-              href="#/augmentation"
-            >
-              Augmentation
-            </a>{' '}
-            — side-by-side splits
-          </li>
-          <li>
-            <a className="text-indigo-700 hover:underline" href="#/alignment">
-              Alignment
-            </a>{' '}
-            — geometry of headline weights
-          </li>
-          <li>
-            <a
-              className="text-indigo-700 hover:underline"
-              href="#/coefficients"
-            >
-              Coefficients
-            </a>{' '}
-            — standardised Ridge weights
-          </li>
-          <li>
-            <a className="text-indigo-700 hover:underline" href="#/decay">
-              Decay
-            </a>{' '}
-            — learned decay curves
-          </li>
-          <li>
-            <a
-              className="text-indigo-700 hover:underline"
-              href="#/performance"
-            >
-              Performance
-            </a>{' '}
-            — folds, α sweep, scatter
-          </li>
-        </ul>
-      </div>
-    </Slide>
-  );
-}
-
-const SLIDES = [SlideTitle, SlideProblem, SlideFeatures, SlideAlignment, SlideAugmentation, SlideResults];
+// ────────────────────────────────────────────────────────────────────────────
+// Main
+// ────────────────────────────────────────────────────────────────────────────
 
 export default function Presentation() {
   const [m, setM] = useState<ModelData | null>(null);
-  const [idx, setIdx] = useState(0);
+  const [sessions, setSessions] = useState<SessionData[] | null>(null);
+  const [sid, setSid] = useState(0);
 
   useEffect(() => {
     loadModel().then(setM);
+    loadSessions().then(setSessions);
   }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement) return;
-      if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') {
-        setIdx((i) => Math.min(SLIDES.length - 1, i + 1));
-      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
-        setIdx((i) => Math.max(0, i - 1));
-      } else if (e.key === 'Home') {
-        setIdx(0);
-      } else if (e.key === 'End') {
-        setIdx(SLIDES.length - 1);
-      }
+      if (!sessions) return;
+      if (e.key === 'ArrowRight') setSid((s) => Math.min(sessions.length - 1, s + 1));
+      else if (e.key === 'ArrowLeft') setSid((s) => Math.max(0, s - 1));
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [sessions]);
 
-  if (!m) return <div className="panel">Loading…</div>;
+  if (!m || !sessions)
+    return <div className="panel">Loading…</div>;
 
-  const SlideComponent = SLIDES[idx];
+  const session = sessions[sid];
+  const N = sessions.length;
+  const returns = computeReturnsTimeSeries(session);
 
   return (
-    <div className="space-y-4">
-      <SlideComponent m={m} />
-
-      {/* Footer controls */}
-      <div className="flex items-center justify-between gap-4">
-        <button
-          type="button"
-          onClick={() => setIdx((i) => Math.max(0, i - 1))}
-          disabled={idx === 0}
-          className="px-4 py-2 text-sm rounded border border-slate-300 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          ← prev
-        </button>
-
-        <div className="flex items-center gap-2">
-          {SLIDES.map((_, i) => (
-            <button
-              type="button"
-              key={i}
-              onClick={() => setIdx(i)}
-              aria-label={`Go to slide ${i + 1}`}
-              className={`w-2.5 h-2.5 rounded-full transition-colors ${
-                i === idx
-                  ? 'bg-indigo-600'
-                  : 'bg-slate-300 hover:bg-slate-400'
-              }`}
+    <div className="space-y-3">
+      {/* Header banner */}
+      <div className="panel space-y-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-widest text-indigo-600 font-semibold">
+              HRT Datathon 2026 · Pitch dashboard
+            </div>
+            <h2 className="text-2xl font-semibold text-slate-900">
+              Ridge + alignment-weighted FinBERT, augmented training
+            </h2>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <StatCard label="Public LB Sharpe" value={fmtSharpe(m.lb_score_public)} accent="#4338ca" />
+            <StatCard label="CV Sharpe (5-fold GroupKFold)" value={fmtSharpe(m.cv_mean_sharpe)} accent="#0d9488" />
+            <StatCard label="α*" value={String(m.alpha_star)} />
+            <StatCard
+              label="Train (orig + aug)"
+              value={`${m.n_train_original ?? '—'} + ${m.n_train_augmented ?? '—'}`}
             />
-          ))}
-          <span className="text-xs text-slate-500 font-mono ml-2">
-            {idx + 1} / {SLIDES.length}
-          </span>
+          </div>
         </div>
 
-        <button
-          type="button"
-          onClick={() =>
-            setIdx((i) => Math.min(SLIDES.length - 1, i + 1))
-          }
-          disabled={idx === SLIDES.length - 1}
-          className="px-4 py-2 text-sm rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          next →
-        </button>
+        {/* Session picker */}
+        <div className="flex flex-wrap items-center gap-3 pt-1 border-t border-slate-100">
+          <label className="text-sm text-slate-700">Session</label>
+          <button
+            type="button"
+            onClick={() => setSid((s) => Math.max(0, s - 1))}
+            className="px-2 py-1 text-sm rounded border border-slate-300 hover:bg-slate-100"
+          >
+            ←
+          </button>
+          <input
+            type="number"
+            min={0}
+            max={N - 1}
+            value={sid}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10);
+              if (!Number.isNaN(v) && v >= 0 && v < N) setSid(v);
+            }}
+            className="w-24 px-2 py-1 text-sm border border-slate-300 rounded font-mono"
+          />
+          <span className="text-sm text-slate-500 font-mono">/ {N - 1}</span>
+          <button
+            type="button"
+            onClick={() => setSid((s) => Math.min(N - 1, s + 1))}
+            className="px-2 py-1 text-sm rounded border border-slate-300 hover:bg-slate-100"
+          >
+            →
+          </button>
+          <button
+            type="button"
+            onClick={() => setSid(Math.floor(Math.random() * N))}
+            className="ml-2 px-3 py-1 text-sm rounded bg-indigo-600 text-white hover:bg-indigo-700"
+          >
+            random
+          </button>
+          <span className="text-xs text-slate-500 font-mono ml-auto">
+            {session.headlines.length} headlines · vol = {session.vol.toFixed(5)} ·
+            ŷ = <span className={session.prediction_vol_adj >= 0 ? 'text-teal-700' : 'text-orange-700'}>
+              {fmtSigned(session.prediction_vol_adj, 3)}
+            </span> ·
+            y = <span className={session.actual_vol_adj >= 0 ? 'text-teal-700' : 'text-orange-700'}>
+              {fmtSigned(session.actual_vol_adj, 3)}
+            </span> ·
+            position = {fmtSigned(session.prediction_raw_position, 2)} ·
+            PnL = <span className={session.pnl_session >= 0 ? 'text-teal-700' : 'text-orange-700'}>
+              {fmtSigned(session.pnl_session, 3)}
+            </span>
+          </span>
+        </div>
       </div>
 
+      {/* Section 1 — Candlestick + headlines */}
+      <section className="panel">
+        <h3 className="text-sm font-semibold text-slate-700 mb-2">
+          Price + headlines · candles 0-49 (seen) · dashed line 50-99 (unseen)
+        </h3>
+        <CandleChart session={session} />
+      </section>
+
+      {/* Section 2 — Sentiment evolution (the headline visual) */}
+      <section className="panel">
+        <h3 className="text-sm font-semibold text-slate-700 mb-1">
+          Sentiment evolution · running totals over bars 0-49
+        </h3>
+        <p className="text-xs text-slate-500 mb-2">
+          Each line is what the model would see at bar t if asked to predict
+          there. Solid = raw FinBERT pos / neg / confidence. Dashed/dotted =
+          alignment-weighted variants ({'k = 3, 5'}). Dash-dot brown ={' '}
+          time-decayed count of LLM-tagged negative headlines.
+        </p>
+        <SentimentEvolutionChart session={session} m={m} />
+      </section>
+
+      {/* Section 3 — Feature contributions */}
+      <section className="panel">
+        <h3 className="text-sm font-semibold text-slate-700 mb-1">
+          Prediction breakdown · standardised feature × coef for this session
+        </h3>
+        <p className="text-xs text-slate-500 mb-2">
+          Sum of bars + intercept ={' '}
+          <span className="font-mono text-slate-900">
+            {fmtSigned(session.prediction_vol_adj, 3)}
+          </span>{' '}
+          (vol-adjusted prediction). Multiply by 1/vol and rescale to get the
+          raw position {fmtSigned(session.prediction_raw_position, 2)}.
+        </p>
+        <FeatureContributionChart session={session} m={m} />
+      </section>
+
+      {/* Section 4 — supporting time-series */}
+      <section className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        <div className="panel">
+          <h3 className="text-sm font-semibold text-slate-700 mb-1">
+            Vol-normalised returns
+          </h3>
+          <p className="text-xs text-slate-500 mb-2">
+            Sharpe-like quantities computed at each bar with a running Parkinson vol.
+          </p>
+          <MiniLineChart
+            ts={returns.ts}
+            yZero
+            series={[
+              { name: 'ret_all_vol', y: returns.retAll, color: '#7c3aed' },
+              { name: 'ret_last5_vol', y: returns.ret5, color: '#f59e0b' },
+              { name: 'ret_last20_vol', y: returns.ret20, color: '#1d4ed8' },
+            ]}
+          />
+        </div>
+        <div className="panel">
+          <h3 className="text-sm font-semibold text-slate-700 mb-1">
+            cand_up_ratio
+          </h3>
+          <p className="text-xs text-slate-500 mb-2">
+            Fraction of up-bars to date — 0.5 line = unbiased random walk.
+          </p>
+          <MiniLineChart
+            ts={returns.ts}
+            series={[{ name: 'cand_up_ratio', y: returns.upRatio, color: '#06b6d4' }]}
+          />
+        </div>
+        <div className="panel">
+          <h3 className="text-sm font-semibold text-slate-700 mb-1">
+            Parkinson volatility (running)
+          </h3>
+          <p className="text-xs text-slate-500 mb-2">
+            Range-based vol estimate using bars 0..t.
+          </p>
+          <MiniLineChart
+            ts={returns.ts}
+            series={[{ name: 'parkinson', y: returns.parkinson, color: '#0d9488' }]}
+          />
+        </div>
+      </section>
+
       <p className="text-xs text-slate-400 text-center">
-        Use ← / → (or PageUp/PageDown) to navigate. Space advances. Home/End
-        jump to ends.
+        Use ← / → to flip through sessions live.
       </p>
     </div>
   );
