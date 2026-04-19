@@ -1,0 +1,82 @@
+name: Build & Deploy Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install Python deps
+        run: uv sync --frozen
+
+      - name: Build site data (decay fit + alpha sweep + JSON dump)
+        run: uv run python scripts/build_site_data.py
+
+      - name: Sanity-check model.json
+        run: |
+          uv run python -c "
+          import json, sys
+          m = json.load(open('web/public/data/model.json'))
+          assert 2.5 < m['cv_mean_sharpe'] < 4.0, f'CV Sharpe {m[\"cv_mean_sharpe\"]} out of expected band'
+          assert m['n_train'] == 1000, f'Expected 1000 train sessions, got {m[\"n_train\"]}'
+          assert len(m['feature_cols']) == 10
+          print(f'OK: cv_mean_sharpe={m[\"cv_mean_sharpe\"]:.4f}  alpha_star={m[\"alpha_star\"]}')
+          "
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: web
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: web
+        env:
+          VITE_BASE: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
