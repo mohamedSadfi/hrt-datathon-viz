@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.linear_model import Ridge
-from sklearn.model_selection import KFold
+from sklearn.model_selection import GroupKFold, KFold
 from sklearn.preprocessing import StandardScaler
 
 # ─── FinBERT Sentiment Cache ─────────────────────────────────────────────────
@@ -129,6 +129,72 @@ def compute_alignments(bars_df, headlines_df):
             scores5.at[idx_in_df] = score * max(0.0, align5)
             
     return scores3.values, scores5.values
+
+
+# ─── Data Augmentation ──────────────────────────────────────────────────────
+
+def create_augmented_data(
+    bars_seen: pd.DataFrame,
+    bars_unseen: pd.DataFrame,
+    headlines_seen: pd.DataFrame,
+    headlines_unseen: pd.DataFrame,
+    split_bar: int = 74,
+) -> tuple:
+    """
+    Create augmented training samples by shifting the seen/unseen split point.
+
+    For split_bar=74 (default):
+      Original : seen = bars 0–49,  unseen = bars 50–99
+      Augmented: seen = bars 25–74, unseen = bars 75–99
+
+    The augmented "seen" bars are re-indexed to bar_ix 0–49 so that
+    feature engineering (which pivots on bar_ix) works identically.
+    Augmented session IDs are offset to avoid collision with originals.
+
+    Returns (aug_bars_seen, aug_bars_unseen, aug_headlines_seen, session_offset).
+    """
+    all_bars = pd.concat([bars_seen, bars_unseen], ignore_index=True)
+    all_bars = all_bars.sort_values(["session", "bar_ix"])
+    all_headlines = pd.concat([headlines_seen, headlines_unseen], ignore_index=True)
+    all_headlines = all_headlines.sort_values(["session", "bar_ix"])
+
+    n_seen = 50  # always 50 bars in the seen window
+    aug_start = split_bar - (n_seen - 1)  # e.g. 74 − 49 = 25
+
+    # ── Augmented "seen" bars: [aug_start, split_bar] ─────────────────────
+    mask_seen = (all_bars["bar_ix"] >= aug_start) & (all_bars["bar_ix"] <= split_bar)
+    aug_bs = all_bars[mask_seen].copy()
+    aug_bs["bar_ix"] = aug_bs["bar_ix"] - aug_start  # re-index → 0..49
+
+    # ── Augmented "unseen" bars: (split_bar, 99] ─────────────────────────
+    aug_bu = all_bars[all_bars["bar_ix"] > split_bar].copy()
+
+    # Keep only sessions that have both seen AND unseen bars
+    valid = set(aug_bs["session"].unique()) & set(aug_bu["session"].unique())
+    # … and exactly n_seen bars in the seen window
+    counts = aug_bs[aug_bs["session"].isin(valid)].groupby("session").size()
+    valid = set(counts[counts == n_seen].index)
+
+    aug_bs = aug_bs[aug_bs["session"].isin(valid)].copy()
+    aug_bu = aug_bu[aug_bu["session"].isin(valid)].copy()
+
+    # ── Augmented headlines: bar_ix ∈ [aug_start, split_bar] ──────────────
+    mask_hdl = (
+        (all_headlines["bar_ix"] >= aug_start)
+        & (all_headlines["bar_ix"] <= split_bar)
+        & all_headlines["session"].isin(valid)
+    )
+    aug_hdl = all_headlines[mask_hdl].copy()
+    aug_hdl["bar_ix"] = aug_hdl["bar_ix"] - aug_start
+
+    # ── Offset session IDs ───────────────────────────────────────────────
+    session_offset = int(bars_seen["session"].max()) + 1
+    aug_bs["session"]  = aug_bs["session"]  + session_offset
+    aug_bu["session"]  = aug_bu["session"]  + session_offset
+    aug_hdl["session"] = aug_hdl["session"] + session_offset
+
+    return aug_bs, aug_bu, aug_hdl, session_offset
+
 
 # Decay rate defaults (used as optimizer starting point; final values learned at runtime)
 _DEFAULT_DECAY_POS = 0.028
@@ -341,15 +407,22 @@ def extract_features(
 def _find_best_alpha(
     X: np.ndarray,
     y: np.ndarray,
+    groups: np.ndarray | None = None,
     n_splits: int = 5,
 ) -> float:
     """CV grid search over ALPHA_GRID; return the alpha with the highest mean Sharpe.
     Fits and evaluates on the raw (unclipped) target.
+    Uses GroupKFold when groups are provided (to prevent augmented-sample leakage).
     """
     kf_results: dict[float, list[float]] = {a: [] for a in ALPHA_GRID}
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    if groups is not None:
+        kf = GroupKFold(n_splits=n_splits)
+        splits = list(kf.split(X, groups=groups))
+    else:
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+        splits = list(kf.split(X))
 
-    for train_idx, test_idx in kf.split(X):
+    for train_idx, test_idx in splits:
         sc = StandardScaler().fit(X[train_idx])
         Xtr = sc.transform(X[train_idx])
         Xvl = sc.transform(X[test_idx])
@@ -374,15 +447,22 @@ def cross_validate(
     X: np.ndarray,
     y: np.ndarray,
     alpha: float = RIDGE_ALPHA,
+    groups: np.ndarray | None = None,
     n_splits: int = 5,
 ) -> list[float]:
     """Run cross-validation and return per-fold Sharpe ratios.
     Fits and evaluates on the raw (unclipped) target.
+    Uses GroupKFold when groups are provided (to prevent augmented-sample leakage).
     """
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    if groups is not None:
+        kf = GroupKFold(n_splits=n_splits)
+        splits = list(kf.split(X, groups=groups))
+    else:
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+        splits = list(kf.split(X))
     fold_sharpes = []
 
-    for train_idx, test_idx in kf.split(X):
+    for train_idx, test_idx in splits:
         scaler = StandardScaler().fit(X[train_idx])
         X_train = scaler.transform(X[train_idx])
         X_test  = scaler.transform(X[test_idx])
@@ -442,10 +522,11 @@ def main() -> None:
     print("=" * 60)
 
     # ── Load data ──────────────────────────────────────────────────────────────
-    print("\n[1/7] Loading data...")
+    print("\n[1/8] Loading data...")
     bars_seen_train   = pd.read_parquet(os.path.join(DATA_DIR, "bars_seen_train.parquet"))
     bars_unseen_train = pd.read_parquet(os.path.join(DATA_DIR, "bars_unseen_train.parquet"))
     headlines_seen_train = pd.read_parquet(os.path.join(DATA_DIR, "headlines_seen_train.parquet"))
+    headlines_unseen_train = pd.read_parquet(os.path.join(DATA_DIR, "headlines_unseen_train.parquet"))
 
     bars_seen_pub = pd.read_parquet(os.path.join(DATA_DIR, "bars_seen_public_test.parquet"))
     headlines_seen_pub = pd.read_parquet(os.path.join(DATA_DIR, "headlines_seen_public_test.parquet"))
@@ -458,46 +539,64 @@ def main() -> None:
     print(f"  Private test       : {bars_seen_priv.session.nunique()}")
     print(f"  LLM annotations    : {len(LLM_SENTIMENTS):,} headlines")
 
+    # ── Data augmentation: shifted split ──────────────────────────────────────
+    print("\n[2/8] Augmenting training data (shifted split at bar 74)...")
+    aug_bs, aug_bu, aug_hdl, session_offset = create_augmented_data(
+        bars_seen_train, bars_unseen_train,
+        headlines_seen_train, headlines_unseen_train, split_bar=74,
+    )
+    combined_bars_seen = pd.concat([bars_seen_train, aug_bs], ignore_index=True)
+    combined_bars_unseen = pd.concat([bars_unseen_train, aug_bu], ignore_index=True)
+    combined_headlines = pd.concat([headlines_seen_train, aug_hdl], ignore_index=True)
+    print(f"  Augmented sessions : {aug_bs.session.nunique()}")
+    print(f"  Combined sessions  : {combined_bars_seen.session.nunique()}")
+    print(f"  Combined headlines : {len(combined_headlines):,}")
+
     # ── Optimize sentiment decay rates (single-seed) ────────────────────
-    print("\n[2/7] Optimizing sentiment decay parameters...")
+    print("\n[3/8] Optimizing sentiment decay parameters...")
     decay_pos, decay_neg = _optimize_decay_params(
-        bars_seen_train, bars_unseen_train, headlines_seen_train
+        combined_bars_seen, combined_bars_unseen, combined_headlines
     )
     print(f"  Final decay_pos={decay_pos:.5f}  decay_neg={decay_neg:.5f}")
 
     # ── Feature engineering ────────────────────────────────────────────────────
-    print("\n[3/7] Engineering features...")
-    train_feat = extract_features(bars_seen_train, headlines_seen_train,
+    print("\n[4/8] Engineering features...")
+    train_feat = extract_features(combined_bars_seen, combined_headlines,
                                   decay_pos=decay_pos, decay_neg=decay_neg)
     print(f"  Features: {FEATURE_COLS}")
     print(f"  Training samples: {len(train_feat)}")
 
     # Compute training target: second-half return scaled by vol
-    close_end_map = bars_unseen_train.groupby("session")["close"].last()
+    close_end_map = combined_bars_unseen.groupby("session")["close"].last()
     train_feat = train_feat.set_index("session")
     raw_return = close_end_map.reindex(train_feat.index) / train_feat["halfway_close"] - 1
     y_train = (raw_return / train_feat["vol"]).values
+
+    # Group mapping for CV: augmented sessions share group with their original
+    groups_all = np.array([int(s) if s < session_offset else int(s) - session_offset
+                           for s in train_feat.index])
     train_feat = train_feat.reset_index()
 
     idx_keep = ~np.isnan(y_train)
     X_train = train_feat[FEATURE_COLS].values[idx_keep]
     y_train = y_train[idx_keep]
+    groups_train = groups_all[idx_keep]
 
     print(f"  Training samples after alignment: {len(X_train)}")
 
     # ── Alpha grid search ──────────────────────────────────────────────────────
-    print("\n[4/7] Finding best Ridge alpha...")
-    best_alpha = _find_best_alpha(X_train, y_train)
+    print("\n[5/8] Finding best Ridge alpha...")
+    best_alpha = _find_best_alpha(X_train, y_train, groups=groups_train)
     print(f"  Best alpha: {best_alpha}")
 
     # ── Cross-validation report ────────────────────────────────────────────────
-    print("\n[5/7] Cross-validating with best alpha...")
-    sharpes = cross_validate(X_train, y_train, alpha=best_alpha)
+    print("\n[6/8] Cross-validating with best alpha...")
+    sharpes = cross_validate(X_train, y_train, alpha=best_alpha, groups=groups_train)
     mean_sharpe = np.mean(sharpes)
-    print(f"  KFold fold sharpes = {[f'{s:.2f}' for s in sharpes]}, mean = {mean_sharpe:.4f}")
+    print(f"  GroupKFold sharpes = {[f'{s:.2f}' for s in sharpes]}, mean = {mean_sharpe:.4f}")
 
     # ── Train final model ──────────────────────────────────────────────────────
-    print("\n[6/7] Training final model on all data...")
+    print("\n[7/8] Training final model on all data...")
     model, scaler = train_final_model(X_train, y_train, alpha=best_alpha)
 
     print("  Coefficients (standardized):")
@@ -506,7 +605,7 @@ def main() -> None:
     print(f"    {'intercept':28s}: {model.intercept_:+.6f}")
 
     # ── Generate predictions ───────────────────────────────────────────────────
-    print("\n[7/7] Generating predictions...")
+    print("\n[8/8] Generating predictions...")
     pub_feat  = extract_features(bars_seen_pub,  headlines_seen_pub,
                                  decay_pos=decay_pos, decay_neg=decay_neg)
     priv_feat = extract_features(bars_seen_priv, headlines_seen_priv,

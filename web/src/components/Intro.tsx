@@ -29,6 +29,11 @@ export default function Intro() {
         <div className="panel">
           <div className="stat-label">Train sessions</div>
           <div className="stat">{m ? m.n_train.toLocaleString() : '…'}</div>
+          {m?.augmentation && (
+            <div className="text-xs text-slate-500 mt-1">
+              {m.n_train_original} original + {m.n_train_augmented} augmented
+            </div>
+          )}
         </div>
       </div>
 
@@ -280,6 +285,38 @@ export default function Intro() {
         )}
       </section>
 
+      {/* Data augmentation */}
+      {m?.augmentation && (
+        <section className="panel space-y-3">
+          <h2 className="text-2xl font-semibold text-slate-900">
+            Data augmentation — shifted train/test split
+          </h2>
+          <p className="text-slate-700 leading-relaxed">
+            Each labeled session contains 100 bars but the model only ever sees
+            50 (bars 0-49) at prediction time. We exploit the remaining 50 bars
+            of <em>training</em> sessions by re-using them as a second sample:
+            the augmented session uses bars {m.augmentation.split_bar - 49}-
+            {m.augmentation.split_bar} as &quot;seen&quot; and bars{' '}
+            {m.augmentation.split_bar + 1}-99 as &quot;unseen&quot;,
+            re-indexed to 0-49 so feature engineering is identical. Augmented
+            session IDs are offset by{' '}
+            <span className="font-mono">{m.augmentation.session_offset}</span>{' '}
+            to avoid collision.
+          </p>
+          <p className="text-slate-700 leading-relaxed">
+            This doubles the labelled set from{' '}
+            <span className="font-mono">{m.n_train_original}</span> to{' '}
+            <span className="font-mono">{m.n_train}</span> samples. Critically,
+            CV uses{' '}
+            <span className="font-mono">GroupKFold</span> with{' '}
+            <em>group = original session id</em>, so the augmented twin and its
+            original never end up split across train and test — without that
+            guard the CV Sharpe would be artificially inflated by the model
+            essentially seeing the future of a held-out session.
+          </p>
+        </section>
+      )}
+
       {/* Training + Inference */}
       <section className="panel space-y-3">
         <h2 className="text-2xl font-semibold text-slate-900">
@@ -288,10 +325,10 @@ export default function Intro() {
         <p className="text-slate-700">
           Ridge target is the vol-scaled second-half return{' '}
           <MathBlock formula="y_{\text{train}} = (C_{99}/C_{49} - 1) / \text{vol}" />
-          . α is selected by 5-fold CV (KFold seed=42) over a 17-point grid; a
-          flat ridge of optima between α=300-500 indicates the model is robust
-          to that knob. Inference position-sizes each session by{' '}
-          <MathBlock formula="1/\text{vol}" /> (inverse-vol Kelly):
+          . α is selected by 5-fold GroupKFold CV over a 17-point grid spanning
+          α ∈ [25, 1000]; a broad flat ridge near the optimum indicates the
+          model is robust to that knob. Inference position-sizes each session
+          by <MathBlock formula="1/\text{vol}" /> (inverse-vol Kelly):
         </p>
         <MathBlock
           display

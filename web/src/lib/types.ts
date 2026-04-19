@@ -54,6 +54,13 @@ export interface ModelData {
   lb_score_public: number;
   lb_score_private: number | null;
   n_train: number;
+  n_train_original?: number;
+  n_train_augmented?: number;
+  augmentation?: {
+    split_bar: number;
+    cv_method: string;
+    session_offset: number;
+  };
 }
 
 export type AlignmentQuadrant =

@@ -75,7 +75,7 @@ export default function PerformancePanel() {
         </h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div>
-            <div className="stat-label">CV Sharpe (5-fold)</div>
+            <div className="stat-label">CV Sharpe (5-fold GroupKFold)</div>
             <div className="stat">
               {fmtSharpe(m.cv_mean_sharpe)}
               <span className="text-sm text-slate-500 ml-2">
@@ -92,12 +92,23 @@ export default function PerformancePanel() {
             <div className="stat">{fmtSharpe(m.lb_score_public)}</div>
           </div>
           <div>
-            <div className="stat-label">In-sample Sharpe</div>
+            <div className="stat-label">In-sample Sharpe (originals)</div>
             <div className="stat">
               {stats ? fmtSharpe(stats.inSampleSharpe) : '…'}
             </div>
           </div>
         </div>
+        {m.augmentation && (
+          <p className="text-xs text-slate-500 mt-3">
+            Trained on <span className="font-mono">{m.n_train}</span> samples
+            (<span className="font-mono">{m.n_train_original}</span> original +{' '}
+            <span className="font-mono">{m.n_train_augmented}</span> augmented
+            via shifted split at bar {m.augmentation.split_bar}). CV uses
+            GroupKFold so an original and its augmented twin always land in
+            the same fold. In-sample Sharpe is computed on the originals only,
+            using the model trained on the combined set.
+          </p>
+        )}
       </div>
 
       {/* Two-up: fold bars + alpha sweep */}
