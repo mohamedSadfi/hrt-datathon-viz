@@ -592,6 +592,59 @@ export default function Presentation() {
       <p className="text-xs text-slate-400 text-center">
         Use ← / → to flip through sessions live.
       </p>
+
+      <ReferenceDashboardToggle />
     </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Hidden reference: collapsible toggle for the original matplotlib dashboard
+// (kept as a backup view to flash up during the talk if needed).
+// Source image lives at web/public/matplotlib-dashboard.jpeg.
+// ────────────────────────────────────────────────────────────────────────────
+function ReferenceDashboardToggle() {
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState(false);
+  const src = `${import.meta.env.BASE_URL}matplotlib-dashboard.jpeg`;
+
+  return (
+    <section className="panel">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-700">
+            Original matplotlib dashboard (reference)
+          </h3>
+          <p className="text-xs text-slate-500">
+            The static all-in-one figure we built first. Toggle to flash it up
+            during the talk.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="px-3 py-1 text-sm rounded bg-slate-700 text-white hover:bg-slate-800"
+        >
+          {open ? 'hide' : 'show reference dashboard'}
+        </button>
+      </div>
+      {open && (
+        <div className="mt-4">
+          {error ? (
+            <p className="text-sm text-orange-700 font-mono">
+              Could not load <code>{src}</code>. Save the image at{' '}
+              <code>web/public/matplotlib-dashboard.jpeg</code> and rebuild.
+            </p>
+          ) : (
+            <img
+              src={src}
+              alt="Original matplotlib model-walkthrough dashboard"
+              className="w-full h-auto rounded border border-slate-200"
+              onError={() => setError(true)}
+            />
+          )}
+        </div>
+      )}
+    </section>
   );
 }
